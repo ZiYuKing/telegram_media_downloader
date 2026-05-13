@@ -167,6 +167,7 @@ async def _get_media_meta(
     message: pyrogram.types.Message,
     media_obj: Union[Audio, Document, Photo, Video, VideoNote, Voice],
     _type: str,
+    download_folder_name: Optional[str] = None,
 ) -> Tuple[str, str, Optional[str]]:
     """Extract file name and file id from media object.
 
@@ -199,10 +200,17 @@ async def _get_media_meta(
     else:
         datetime_dir_name = "0"
 
+    temp_save_path = os.path.join(app.temp_save_path, dirname)
+    if download_folder_name:
+        download_folder_name = validate_title(download_folder_name)
+        temp_save_path = os.path.join(temp_save_path, download_folder_name)
+
     if _type in ["voice", "video_note"]:
         # pylint: disable = C0209
         file_format = media_obj.mime_type.split("/")[-1]  # type: ignore
         file_save_path = app.get_file_save_path(_type, dirname, datetime_dir_name)
+        if download_folder_name:
+            file_save_path = os.path.join(file_save_path, download_folder_name)
         file_name = "{} - {}_{}.{}".format(
             message.id,
             _type,
@@ -210,7 +218,7 @@ async def _get_media_meta(
             file_format,
         )
         file_name = validate_title(file_name)
-        temp_file_name = os.path.join(app.temp_save_path, dirname, file_name)
+        temp_file_name = os.path.join(temp_save_path, file_name)
 
         file_name = os.path.join(file_save_path, file_name)
     else:
@@ -248,8 +256,10 @@ async def _get_media_meta(
         )
 
         file_save_path = app.get_file_save_path(_type, dirname, datetime_dir_name)
+        if download_folder_name:
+            file_save_path = os.path.join(file_save_path, download_folder_name)
 
-        temp_file_name = os.path.join(app.temp_save_path, dirname, gen_file_name)
+        temp_file_name = os.path.join(temp_save_path, gen_file_name)
 
         file_name = os.path.join(file_save_path, gen_file_name)
     return truncate_filename(file_name), truncate_filename(temp_file_name), file_format
@@ -402,7 +412,11 @@ async def download_media(
             if _media is None:
                 continue
             file_name, temp_file_name, file_format = await _get_media_meta(
-                node.chat_id, message, _media, _type
+                node.chat_id,
+                message,
+                _media,
+                _type,
+                node.download_folder_name,
             )
             media_size = getattr(_media, "file_size", 0)
 

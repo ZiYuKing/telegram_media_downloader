@@ -1,9 +1,12 @@
 """Bot for media downloader"""
 
 import asyncio
+import json
 import os
+import time
 from datetime import datetime
-from typing import Callable, List, Union
+from enum import Enum
+from typing import Any, Callable, List, Optional, Union
 
 import pyrogram
 from loguru import logger
@@ -42,6 +45,65 @@ from utils.meta_data import MetaData
 
 # pylint: disable = C0301, R0902
 
+DIRECT_DOWNLOAD_FOLDER_CACHE_TTL = 60
+
+
+def serialize_pyrogram_object(value: Any, depth: int = 0, seen: set = None):
+    """Serialize Pyrogram objects for full inbound bot message logging."""
+    if seen is None:
+        seen = set()
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, Enum):
+        return value.value
+
+    if isinstance(value, bytes):
+        return value.hex()
+
+    if depth >= 10:
+        return repr(value)
+
+    value_id = id(value)
+    if value_id in seen:
+        return f"<circular {type(value).__name__}>"
+
+    if isinstance(value, dict):
+        seen.add(value_id)
+        return {
+            str(key): serialize_pyrogram_object(item, depth + 1, seen)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        seen.add(value_id)
+        return [serialize_pyrogram_object(item, depth + 1, seen) for item in value]
+
+    if hasattr(value, "__dict__"):
+        seen.add(value_id)
+        result = {"_": type(value).__name__}
+        for key, item in vars(value).items():
+            if key.startswith("_"):
+                continue
+            result[key] = serialize_pyrogram_object(item, depth + 1, seen)
+        return result
+
+    return repr(value)
+
+
+def format_pyrogram_object(value: Any) -> str:
+    """Format a Pyrogram object as stable, readable JSON for logs."""
+    return json.dumps(
+        serialize_pyrogram_object(value),
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
+
 
 class DownloadBot:
     """Download bot"""
@@ -70,6 +132,7 @@ class DownloadBot:
         self.download_filter: List[str] = []
         self.task_id: int = 0
         self.reply_task = None
+        self.direct_download_folder_cache: dict = {}
 
     def gen_task_id(self) -> int:
         """Gen task id"""
@@ -132,6 +195,38 @@ class DownloadBot:
 
         with open("d", "w", encoding="utf-8") as yaml_file:
             self._yaml.dump(self.config, yaml_file)
+
+    def set_direct_download_folder(self, user_id: Union[int, str], folder_name: str):
+        """Cache a short-lived folder name for direct forwarded media downloads."""
+        folder_name = validate_title(folder_name.strip())
+        if not folder_name:
+            return
+
+        self.direct_download_folder_cache[user_id] = {
+            "folder_name": folder_name,
+            "updated_at": time.time(),
+        }
+        logger.info(
+            "Set direct download folder for user {}: {}",
+            user_id,
+            folder_name,
+        )
+
+    def get_direct_download_folder(
+        self, user_id: Union[int, str]
+    ) -> Optional[str]:
+        """Return the user's active direct download folder if it has not expired."""
+        cache_item = self.direct_download_folder_cache.get(user_id)
+        if not cache_item:
+            return None
+
+        now = time.time()
+        if now - cache_item["updated_at"] > DIRECT_DOWNLOAD_FOLDER_CACHE_TTL:
+            self.direct_download_folder_cache.pop(user_id, None)
+            return None
+
+        cache_item["updated_at"] = now
+        return cache_item["folder_name"]
 
     async def start(
         self,
@@ -210,6 +305,23 @@ class DownloadBot:
         self.allowed_user_ids.append(admin.id)
 
         await self.bot.set_bot_commands(commands)
+
+        self.bot.add_handler(
+            MessageHandler(
+                cache_direct_download_folder,
+                filters=pyrogram.filters.text
+                & pyrogram.filters.user(self.allowed_user_ids),
+            ),
+            group=-2,
+        )
+        self.bot.add_handler(
+            MessageHandler(log_bot_received_message, filters=pyrogram.filters.all),
+            group=-1,
+        )
+        self.bot.add_handler(
+            CallbackQueryHandler(log_bot_received_callback_query),
+            group=-1,
+        )
 
         self.bot.add_handler(
             MessageHandler(
@@ -313,7 +425,6 @@ class DownloadBot:
 
 
 _bot = DownloadBot()
-
 
 async def start_download_bot(
     app: Application,
@@ -806,6 +917,7 @@ async def direct_download(
     message: pyrogram.types.Message,
     download_message: pyrogram.types.Message,
     client: pyrogram.Client = None,
+    download_folder_name: Optional[str] = None,
 ):
     """Direct Download"""
 
@@ -825,6 +937,13 @@ async def direct_download(
     )
 
     node.client = client
+    node.download_folder_name = download_folder_name
+    if node.download_folder_name:
+        logger.info(
+            "Direct download message {} will be saved under folder: {}",
+            download_message.id,
+            node.download_folder_name,
+        )
 
     _bot.add_task_node(node)
 
@@ -851,7 +970,22 @@ async def download_forward_media(
     """
 
     if message.media and getattr(message, message.media.value):
-        await direct_download(_bot, message.from_user.id, message, message, client)
+        download_folder_name = None
+        if message.from_user:
+            download_folder_name = _bot.get_direct_download_folder(message.from_user.id)
+            if not download_folder_name:
+                await asyncio.sleep(1)
+                download_folder_name = _bot.get_direct_download_folder(
+                    message.from_user.id
+                )
+        await direct_download(
+            _bot,
+            message.from_user.id,
+            message,
+            message,
+            client,
+            download_folder_name,
+        )
         return
 
     await client.send_message(
