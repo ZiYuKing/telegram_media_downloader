@@ -228,6 +228,37 @@ class DownloadBot:
         cache_item["updated_at"] = now
         return cache_item["folder_name"]
 
+    async def cache_direct_download_folder(
+        self, _: pyrogram.Client, message: pyrogram.types.Message
+    ):
+        """Cache plain text as the folder for immediately forwarded media."""
+        if not message.from_user or not message.text:
+            return
+
+        folder_name = message.text.strip()
+        if not folder_name:
+            return
+
+        if folder_name.startswith("/") or folder_name.startswith("https://t.me"):
+            return
+
+        self.set_direct_download_folder(message.from_user.id, folder_name)
+
+    async def log_bot_received_message(
+        self, _: pyrogram.Client, message: pyrogram.types.Message
+    ):
+        """Log every complete message received by the bot."""
+        logger.info("Bot received raw message:\n{}", format_pyrogram_object(message))
+
+    async def log_bot_received_callback_query(
+        self, _: pyrogram.Client, callback_query: pyrogram.types.CallbackQuery
+    ):
+        """Log every complete callback query received by the bot."""
+        logger.info(
+            "Bot received raw callback query:\n{}",
+            format_pyrogram_object(callback_query),
+        )
+
     async def start(
         self,
         app: Application,
@@ -308,18 +339,18 @@ class DownloadBot:
 
         self.bot.add_handler(
             MessageHandler(
-                cache_direct_download_folder,
+                self.cache_direct_download_folder,
                 filters=pyrogram.filters.text
                 & pyrogram.filters.user(self.allowed_user_ids),
             ),
             group=-2,
         )
         self.bot.add_handler(
-            MessageHandler(log_bot_received_message, filters=pyrogram.filters.all),
+            MessageHandler(self.log_bot_received_message, filters=pyrogram.filters.all),
             group=-1,
         )
         self.bot.add_handler(
-            CallbackQueryHandler(log_bot_received_callback_query),
+            CallbackQueryHandler(self.log_bot_received_callback_query),
             group=-1,
         )
 
